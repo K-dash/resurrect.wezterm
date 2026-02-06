@@ -67,6 +67,54 @@ local function pop_connected_right(root, panes)
 	end
 end
 
+--- Pre-extract pane metadata into each PaneInformation table directly,
+--- so that even after .pane is set to nil on a shared reference, the
+--- saved fields (domain, cwd, text, etc.) remain accessible.
+---@param panes PaneInformation[]
+local function pre_extract_all_pane_info(panes)
+	for _, p in ipairs(panes) do
+		if p.pane and not p._pane_info_extracted then
+			local domain = p.pane:get_domain_name()
+			local spawnable = wezterm.mux.get_domain(domain):is_spawnable()
+			p._pane_info_extracted = true
+			p._spawnable = spawnable
+
+			if not spawnable then
+				p._domain = domain
+			else
+				p._domain = domain
+
+				local cwd_obj = p.pane:get_current_working_dir()
+				if not cwd_obj then
+					p._cwd = ""
+				else
+					p._cwd = cwd_obj.file_path
+					if utils.is_windows then
+						p._cwd = p._cwd:gsub("^/([a-zA-Z]):", "%1:")
+					end
+				end
+
+				if domain == "local" then
+					p._alt_screen_active = p.pane:is_alt_screen_active()
+					if p._alt_screen_active then
+						local process_info = p.pane:get_foreground_process_info()
+						process_info.children = nil
+						process_info.pid = nil
+						process_info.ppid = nil
+						p._process = process_info
+					else
+						local nlines = p.pane:get_dimensions().scrollback_rows
+						if nlines > pub.max_nlines then
+							nlines = pub.max_nlines
+						end
+						p._text = p.pane:get_lines_as_escapes(nlines)
+					end
+				end
+			end
+		end
+	end
+end
+
 ---@param root pane_tree | nil
 ---@param panes PaneInformation[]
 ---@return pane_tree | nil
@@ -75,44 +123,32 @@ local function insert_panes(root, panes)
 		return nil
 	end
 
-	local domain = root.pane:get_domain_name()
-	if not wezterm.mux.get_domain(domain):is_spawnable() then
-		wezterm.log_warn("Domain " .. domain .. " is not spawnable")
-		wezterm.emit("resurrect.error", "Domain " .. domain .. " is not spawnable")
-	else
-		root.domain = domain
-
-		if not root.pane:get_current_working_dir() then
-			root.cwd = ""
+	-- Use pre-extracted info (works even if .pane was nilled by a sibling subtree)
+	if root._pane_info_extracted then
+		if not root._spawnable then
+			wezterm.log_warn("Domain " .. (root._domain or "?") .. " is not spawnable")
+			wezterm.emit("resurrect.error", "Domain " .. (root._domain or "?") .. " is not spawnable")
 		else
-			root.cwd = root.pane:get_current_working_dir().file_path
-			if utils.is_windows then
-				root.cwd = root.cwd:gsub("^/([a-zA-Z]):", "%1:")
-			end
+			root.domain = root._domain
+			root.cwd = root._cwd
+			root.alt_screen_active = root._alt_screen_active
+			root.process = root._process
+			root.text = root._text
 		end
-
-		if domain == "local" then
-			-- pane:inject_output() is unavailable for non-local domains,
-			-- only saving local scrollback because it would slow down the process
-			-- See: https://github.com/MLFlexer/resurrect.wezterm/issues/41
-			root.alt_screen_active = root.pane:is_alt_screen_active()
-			if root.alt_screen_active then
-				local process_info = root.pane:get_foreground_process_info()
-				process_info.children = nil
-				process_info.pid = nil
-				process_info.ppid = nil
-				root.process = process_info
-			else
-				local nlines = root.pane:get_dimensions().scrollback_rows
-				if nlines > pub.max_nlines then
-					nlines = pub.max_nlines
-				end
-				root.text = root.pane:get_lines_as_escapes(nlines)
-			end
-		end
+	elseif root.pane == nil then
+		wezterm.log_warn("resurrect: skipping pane with nil pane field and no cached info")
+		return nil
 	end
 
+	-- Clean up internal fields
 	root.pane = nil
+	root._pane_info_extracted = nil
+	root._spawnable = nil
+	root._domain = nil
+	root._cwd = nil
+	root._alt_screen_active = nil
+	root._process = nil
+	root._text = nil
 
 	if #panes == 0 then
 		return root
@@ -145,6 +181,10 @@ end
 ---@param panes PaneInformation
 ---@return pane_tree | nil
 function pub.create_pane_tree(panes)
+	-- Pre-extract all pane info before tree construction so that
+	-- shared references (same pane in both right and bottom) don't
+	-- lose their metadata when .pane gets nilled out.
+	pre_extract_all_pane_info(panes)
 	table.sort(panes, compare_pane_by_coord)
 	local root = table.remove(panes, 1)
 	return insert_panes(root, panes)
