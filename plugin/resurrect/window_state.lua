@@ -53,6 +53,7 @@ function pub.restore_window(window, window_state, opts)
 	end
 
 	local active_tab
+	local failed_tabs = {}
 	for i, tab_state in ipairs(window_state.tabs) do
 		local tab
 		if i == 1 and opts.tab then
@@ -69,17 +70,26 @@ function pub.restore_window(window, window_state, opts)
 			close_all_other_tabs(window, tab)
 		end
 
-		tab_state_mod.restore_tab(tab, tab_state, opts)
+		local ok, err = pcall(tab_state_mod.restore_tab, tab, tab_state, opts)
+		if not ok then
+			wezterm.log_warn("resurrect: skipping tab " .. i .. ": " .. tostring(err))
+			table.insert(failed_tabs, i)
+		end
 		if tab_state.is_active then
 			active_tab = tab
 		end
 
 		if tab_state.is_zoomed then
-			tab:set_zoomed(true)
+			pcall(function() tab:set_zoomed(true) end)
 		end
 	end
 
-	active_tab:activate()
+	if active_tab then
+		active_tab:activate()
+	end
+	if #failed_tabs > 0 then
+		wezterm.log_warn("resurrect: " .. #failed_tabs .. " tab(s) had errors during restore: " .. table.concat(failed_tabs, ", "))
+	end
 	wezterm.emit("resurrect.window_state.restore_window.finished")
 end
 

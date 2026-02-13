@@ -14,7 +14,7 @@ local function make_splits(opts)
 		local pane = pane_tree.pane
 
 		if opts.on_pane_restore then
-			opts.on_pane_restore(pane_tree)
+			pcall(opts.on_pane_restore, pane_tree)
 		end
 
 		local bottom = pane_tree.bottom
@@ -26,7 +26,13 @@ local function make_splits(opts)
 				split_args.size = bottom.height
 			end
 
-			bottom.pane = pane:split(split_args)
+			local ok, result = pcall(function() return pane:split(split_args) end)
+			if ok then
+				bottom.pane = result
+			else
+				wezterm.log_warn("resurrect: split bottom failed, skipping pane: " .. tostring(result))
+				bottom.pane = pane -- fallback: share parent pane so fold can continue
+			end
 		end
 
 		local right = pane_tree.right
@@ -38,7 +44,13 @@ local function make_splits(opts)
 				split_args.size = right.width
 			end
 
-			right.pane = pane:split(split_args)
+			local ok, result = pcall(function() return pane:split(split_args) end)
+			if ok then
+				right.pane = result
+			else
+				wezterm.log_warn("resurrect: split right failed, skipping pane: " .. tostring(result))
+				right.pane = pane -- fallback: share parent pane so fold can continue
+			end
 		end
 
 		if pane_tree.is_active then
